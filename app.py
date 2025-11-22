@@ -1,23 +1,30 @@
-import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 import xgboost as xgb
 import ta
-import matplotlib.pyplot as plt
+import streamlit as st
+import time
 
 st.set_page_config(page_title="AI Market Analyzer", layout="wide")
 
 st.title("📊 AI Market Analyzer — Web Version")
 
-# --- Inputs ---
-symbol = st.text_input("Enter symbol (e.g., GC=F, EURUSD=X, BTC-USD):", "AAPL")
-period = st.selectbox("Select period:", ["1mo", "3mo", "6mo", "1y"], index=1)
-interval = st.selectbox("Select interval:", ["1m", "5m", "15m", "1h", "4h", "1d"], index=3)
+# --- Sidebar ---
+symbol = st.sidebar.text_input("Symbol", "AAPL")
+period = st.sidebar.selectbox("Period", ["7d","1mo","3mo","6mo","1y"], index=2)
+interval = st.sidebar.selectbox("Interval", ["1m","5m","15m","1h","4h","1d"], index=2)
 
-if st.button("Run Analysis"):
-    st.write("⏳ Fetching data...")
+auto_refresh = st.sidebar.checkbox("Auto Refresh (كل 60 ثانية)")
+run = st.sidebar.button("Run Analysis")
 
+if auto_refresh:
+    st.experimental_rerun()
+
+if run or auto_refresh:
+    st.info("Fetching data...")
+    
     df = yf.download(
         tickers=symbol,
         period=period,
@@ -27,7 +34,7 @@ if st.button("Run Analysis"):
     )
 
     if df.empty:
-        st.error("❌ No data found. Try another symbol.")
+        st.error("No data found for this symbol.")
         st.stop()
 
     # Fix MultiIndex
@@ -35,26 +42,34 @@ if st.button("Run Analysis"):
         df.columns = df.columns.get_level_values(0)
 
     df = df.reset_index()
-    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    if "Date" in df.columns:
+        df.set_index("Date", inplace=True)
+    elif "Datetime" in df.columns:
+        df.set_index("Datetime", inplace=True)
 
-    close_series = pd.Series(df["Close"].values, index=df.index)
+    df.columns = [c.capitalize() for c in df.columns]
+
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    close = df["Close"].values.flatten()
+    close_series = pd.Series(close, index=df.index)
 
     # Indicators
-    df["RSI"] = ta.momentum.RSIIndicator(close_series).rsi()
+    df["Rsi"] = ta.momentum.RSIIndicator(close_series).rsi()
     macd = ta.trend.MACD(close_series)
-    df["MACD"] = macd.macd()
+    df["Macd"] = macd.macd()
     df["Signal"] = macd.macd_signal()
+
     boll = ta.volatility.BollingerBands(close_series)
-    df["Bollinger_High"] = boll.bollinger_hband()
-    df["Bollinger_Low"] = boll.bollinger_lband()
+    df["Boll_high"] = boll.bollinger_hband()
+    df["Boll_low"] = boll.bollinger_lband()
 
     df.dropna(inplace=True)
 
-    # Prepare data for AI model
+    # AI Prediction
     df["Prediction"] = df["Close"].shift(-1)
     df_model = df.dropna()
 
-    features = ["Close", "RSI", "MACD", "Signal", "Bollinger_High", "Bollinger_Low"]
+    features = ["Close","Rsi","Macd","Signal","Boll_high","Boll_low"]
     X = df_model[features]
     y = df_model["Prediction"]
 
@@ -68,24 +83,39 @@ if st.button("Run Analysis"):
     )
     model.fit(X, y)
 
-    last_row = X.iloc[-1].values.reshape(1, -1)
-    pred = float(model.predict(last_row)[0])
-    current_price = float(df["Close"].iloc[-1])
+    pred = float(model.predict(X.iloc[-1].values.reshape(1,-1))[0])
+    price = float(df["Close"].iloc[-1])
 
-    trend = "🔺 UP (صعود)" if pred > current_price else "🔻 DOWN (هبوط)"
+    trend = "🔺 UP (صعود)" if pred > price else "🔻 DOWN (هبوط)"
 
-    # Display results
-    st.subheader("📘 Analysis Result")
-    st.write(f"**Current Price:** {current_price:.2f}")
-    st.write(f"**Predicted Price:** {pred:.2f}")
+    # Buy/Sell Signals
+    buy = (df["Macd"] > df["Signal"]) & (df["Macd"].shift(1) <= df["Signal"].shift(1))
+    sell = (df["Macd"] < df["Signal"]) & (df["Macd"].shift(1) >= df["Signal"].shift(1))
+
+    df["Buy_sig"] = np.where(buy, df["Boll_low"], np.nan)
+    df["Sell_sig"] = np.where(sell, df["Boll_high"], np.nan)
+
+    # --- Display Results ---
+    st.subheader("🟦 Analysis Result")
+    st.write(f"**Current Price:** {price:.2f}")
+    st.write(f"**Predicted Next Price:** {pred:.2f}")
     st.write(f"**Trend:** {trend}")
 
-    # Chart
-    fig, ax = plt.subplots(figsize=(12, 6))
+    # --- Chart ---
+    fig, ax = plt.subplots(figsize=(12,6))
     ax.plot(df.index, df["Close"], label="Price", color="cyan")
-    ax.scatter(df.index[-1], pred, color="yellow", s=200, marker="*", label="Prediction")
+    ax.scatter(df.index, df["Buy_sig"], color="lime", marker="^", s=150, label="Buy")
+    ax.scatter(df.index, df["Sell_sig"], color="red", marker="v", s=150, label="Sell")
+
+    # Prediction star
+    ax.scatter(df.index[-1], pred, color="yellow", s=250, marker="*", label="Prediction")
+
     ax.set_title(f"{symbol.upper()} Price Chart")
     ax.grid(True, alpha=0.3)
     ax.legend()
 
     st.pyplot(fig)
+
+    if auto_refresh:
+        time.sleep(60)
+        st.experimental_rerun()
