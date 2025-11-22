@@ -1,30 +1,25 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import xgboost as xgb
 import ta
-import streamlit as st
-import time
 
 st.set_page_config(page_title="AI Market Analyzer", layout="wide")
 
 st.title("📊 AI Market Analyzer — Web Version")
+st.write("تحليل السوق باستخدام الذكاء الاصطناعي + MACD + RSI + Bollinger")
 
-# --- Sidebar ---
-symbol = st.sidebar.text_input("Symbol", "AAPL")
-period = st.sidebar.selectbox("Period", ["7d","1mo","3mo","6mo","1y"], index=2)
-interval = st.sidebar.selectbox("Interval", ["1m","5m","15m","1h","4h","1d"], index=2)
+# --- INPUTS ---
+symbol = st.text_input("Symbol", "AAPL")
+period = st.selectbox("Period", ["7d","1mo","3mo","6mo","1y"])
+interval = st.selectbox("Interval", ["1m","5m","15m","1h","4h","1d"])
 
-auto_refresh = st.sidebar.checkbox("Auto Refresh (كل 60 ثانية)")
-run = st.sidebar.button("Run Analysis")
-
-if auto_refresh:
-    st.experimental_rerun()
-
-if run or auto_refresh:
-    st.info("Fetching data...")
+if st.button("Run Analysis"):
     
+    st.info("⏳ Fetching data...")
+
     df = yf.download(
         tickers=symbol,
         period=period,
@@ -34,10 +29,10 @@ if run or auto_refresh:
     )
 
     if df.empty:
-        st.error("No data found for this symbol.")
+        st.error("No data found!")
         st.stop()
 
-    # Fix MultiIndex
+    # --- Fix MultiIndex ---
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
@@ -56,12 +51,11 @@ if run or auto_refresh:
     # Indicators
     df["Rsi"] = ta.momentum.RSIIndicator(close_series).rsi()
     macd = ta.trend.MACD(close_series)
-    df["Macd"] = macd.macd()
-    df["Signal"] = macd.macd_signal()
-
+    df["Macd"] = macd.macd().astype(float)
+    df["Signal"] = macd.macd_signal().astype(float)
     boll = ta.volatility.BollingerBands(close_series)
-    df["Boll_high"] = boll.bollinger_hband()
-    df["Boll_low"] = boll.bollinger_lband()
+    df["Boll_h"] = boll.bollinger_hband().astype(float)
+    df["Boll_l"] = boll.bollinger_lband().astype(float)
 
     df.dropna(inplace=True)
 
@@ -69,7 +63,7 @@ if run or auto_refresh:
     df["Prediction"] = df["Close"].shift(-1)
     df_model = df.dropna()
 
-    features = ["Close","Rsi","Macd","Signal","Boll_high","Boll_low"]
+    features = ["Close","Rsi","Macd","Signal","Boll_h","Boll_l"]
     X = df_model[features]
     y = df_model["Prediction"]
 
@@ -83,32 +77,31 @@ if run or auto_refresh:
     )
     model.fit(X, y)
 
-    pred = float(model.predict(X.iloc[-1].values.reshape(1,-1))[0])
-    price = float(df["Close"].iloc[-1])
+    last_row = X.iloc[-1].values.reshape(1, -1)
+    pred = float(model.predict(last_row)[0])
+    current_price = float(df["Close"].iloc[-1])
 
-    trend = "🔺 UP (صعود)" if pred > price else "🔻 DOWN (هبوط)"
+    trend = "⬆️ UP (صعود)" if pred > current_price else "⬇️ DOWN (هبوط)"
 
     # Buy/Sell Signals
     buy = (df["Macd"] > df["Signal"]) & (df["Macd"].shift(1) <= df["Signal"].shift(1))
     sell = (df["Macd"] < df["Signal"]) & (df["Macd"].shift(1) >= df["Signal"].shift(1))
 
-    df["Buy_sig"] = np.where(buy, df["Boll_low"], np.nan)
-    df["Sell_sig"] = np.where(sell, df["Boll_high"], np.nan)
+    df["Buy"] = np.where(buy, df["Boll_l"], np.nan)
+    df["Sell"] = np.where(sell, df["Boll_h"], np.nan)
 
-    # --- Display Results ---
-    st.subheader("🟦 Analysis Result")
-    st.write(f"**Current Price:** {price:.2f}")
-    st.write(f"**Predicted Next Price:** {pred:.2f}")
+    # ---- Display Result ----
+    st.subheader("📘 Analysis Result")
+    st.write(f"**Current Price:** {current_price}")
+    st.write(f"**Predicted Price:** {pred:.2f}")
     st.write(f"**Trend:** {trend}")
 
-    # --- Chart ---
+    # ---- Plot ----
     fig, ax = plt.subplots(figsize=(12,6))
     ax.plot(df.index, df["Close"], label="Price", color="cyan")
-    ax.scatter(df.index, df["Buy_sig"], color="lime", marker="^", s=150, label="Buy")
-    ax.scatter(df.index, df["Sell_sig"], color="red", marker="v", s=150, label="Sell")
-
-    # Prediction star
-    ax.scatter(df.index[-1], pred, color="yellow", s=250, marker="*", label="Prediction")
+    ax.scatter(df.index, df["Buy"], color="lime", marker="^", s=120, label="Buy")
+    ax.scatter(df.index, df["Sell"], color="red", marker="v", s=120, label="Sell")
+    ax.scatter(df.index[-1], pred, color="yellow", marker="*", s=200, label="Prediction")
 
     ax.set_title(f"{symbol.upper()} Price Chart")
     ax.grid(True, alpha=0.3)
@@ -116,6 +109,4 @@ if run or auto_refresh:
 
     st.pyplot(fig)
 
-    if auto_refresh:
-        time.sleep(60)
-        st.experimental_rerun()
+    st.success("✔️ Analysis Completed!")
